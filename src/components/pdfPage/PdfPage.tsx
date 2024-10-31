@@ -65,6 +65,8 @@ const PdfPage: FC<IPdfPageProps> = (props) => {
   const [isRendered, setIsRendered] = useState(false);
   const [isIntersecting, setIsIntersecting] = useState(false);
   const [intersectionRatio, setIntersectionRatio] = useState(0);
+  const pageRef = useRef<PDFPageProxy | null>(null);
+  const prevBboxList = useRef<IBbox[]>([]);
   useIntersection(intersectionRef, {
     threshold: [.2, .4, .5, .6, .8, 1],
   }, (entry) => {
@@ -94,72 +96,81 @@ const PdfPage: FC<IPdfPageProps> = (props) => {
       }
     });
   }, []);
+
+  const createErrorsMap = useCallback(
+    (page: PDFPageProxy) => {
+      Promise.all([page.getOperatorList(), page.getAnnotations()]).then(([operatorList, annotations]) => {
+        const annotBBoxesAndOpPos = operatorList.argsArray[operatorList.argsArray.length - 3];
+        const operationData = operatorList.argsArray[operatorList.argsArray.length - 2];
+        const [positionData, noMCIDData] = operatorList.argsArray[operatorList.argsArray.length - 1];
+        const annotsFormatted = getFormattedAnnotations(annotations);
+        const allBboxes = createAllBboxes(props.treeElementsBboxes, positionData, annotsFormatted, page.view, page.rotate);
+        const errorBboxes = bboxList.map((bbox) => {
+          let opData = operationData,
+              posData = positionData,
+              nMcidData = noMCIDData;
+          let left = 0, bottom = 0;
+          const { annotIndex } = bbox;
+          if (annotIndex != null) {
+            left = annotations[annotIndex]?.rect[0] ?? 0;
+            bottom = annotations[annotIndex]?.rect[1] ?? 0;
+            opData = annotBBoxesAndOpPos[annotIndex]?.[0] ?? [];
+            [posData, nMcidData] = annotBBoxesAndOpPos[annotIndex]?.[1] ?? [[], []];
+          }
+  
+          if (bbox.mcidList) {
+            bbox.location = parseMcidToBbox(
+              bbox.mcidList,
+              posData,
+              annotsFormatted,
+              page.view,
+              page.rotate,
+              left,
+              bottom,
+            );
+            if (_.isEmpty(bbox.location)) {
+              return null;
+            }
+          } else if (bbox.contentItemPath) {
+            const contentItemsPath = bbox.contentItemPath.slice(2);
+            let contentItemsBBoxes = nMcidData[bbox.contentItemPath[1]];
+            try {
+              contentItemsPath.forEach((ci, i) => {
+                if (contentItemsPath.length > i + 1 || !contentItemsBBoxes.final) {
+                  contentItemsBBoxes = contentItemsBBoxes.contentItems[0];
+                }
+                contentItemsBBoxes = contentItemsBBoxes.contentItems[ci];
+              });
+  
+              bbox.location = [
+                contentItemsBBoxes.contentItem.x + left,
+                contentItemsBBoxes.contentItem.y + bottom,
+                contentItemsBBoxes.contentItem.w,
+                contentItemsBBoxes.contentItem.h
+              ];
+            } catch (err) {
+              console.log('NoMCIDDataParseError:', err.message || err);
+              bbox.location = [0, 0, 0, 0];
+            }
+          }
+          if (_.isNumber(bbox.operatorIndex) && _.isNumber(bbox.glyphIndex)) {
+            bbox.location = getBboxForGlyph(bbox.operatorIndex, bbox.glyphIndex, opData, page.view, page.rotate, left, bottom);
+          }
+  
+          return bbox;
+        });
+        setBboxesAll(allBboxes);
+        setBboxesErrors(errorBboxes);
+      });
+    },
+    [props.bboxList, props.treeElementsBboxes]
+  );
+
   const onPageLoadSuccess = useCallback((page: PDFPageProxy) => {
     setIsRendered(true);
     setPageViewport(page.view);
-    Promise.all([page.getOperatorList(), page.getAnnotations()]).then(([operatorList, annotations]) => {
-      const annotBBoxesAndOpPos = operatorList.argsArray[operatorList.argsArray.length - 3];
-      const operationData = operatorList.argsArray[operatorList.argsArray.length - 2];
-      const [positionData, noMCIDData] = operatorList.argsArray[operatorList.argsArray.length - 1];
-      const annotsFormatted = getFormattedAnnotations(annotations);
-      const allBboxes = createAllBboxes(props.treeElementsBboxes, positionData, annotsFormatted, page.view, page.rotate);
-      const errorBboxes = bboxList.map((bbox) => {
-        let opData = operationData,
-            posData = positionData,
-            nMcidData = noMCIDData;
-        let left = 0, bottom = 0;
-        const { annotIndex } = bbox;
-        if (annotIndex != null) {
-          left = annotations[annotIndex]?.rect[0] ?? 0;
-          bottom = annotations[annotIndex]?.rect[1] ?? 0;
-          opData = annotBBoxesAndOpPos[annotIndex]?.[0] ?? [];
-          [posData, nMcidData] = annotBBoxesAndOpPos[annotIndex]?.[1] ?? [[], []];
-        }
-
-        if (bbox.mcidList) {
-          bbox.location = parseMcidToBbox(
-            bbox.mcidList,
-            posData,
-            annotsFormatted,
-            page.view,
-            page.rotate,
-            left,
-            bottom,
-          );
-          if (_.isEmpty(bbox.location)) {
-            return null;
-          }
-        } else if (bbox.contentItemPath) {
-          const contentItemsPath = bbox.contentItemPath.slice(2);
-          let contentItemsBBoxes = nMcidData[bbox.contentItemPath[1]];
-          try {
-            contentItemsPath.forEach((ci, i) => {
-              if (contentItemsPath.length > i + 1 || !contentItemsBBoxes.final) {
-                contentItemsBBoxes = contentItemsBBoxes.contentItems[0];
-              }
-              contentItemsBBoxes = contentItemsBBoxes.contentItems[ci];
-            });
-
-            bbox.location = [
-              contentItemsBBoxes.contentItem.x + left,
-              contentItemsBBoxes.contentItem.y + bottom,
-              contentItemsBBoxes.contentItem.w,
-              contentItemsBBoxes.contentItem.h
-            ];
-          } catch (err) {
-            console.log('NoMCIDDataParseError:', err.message || err);
-            bbox.location = [0, 0, 0, 0];
-          }
-        }
-        if (_.isNumber(bbox.operatorIndex) && _.isNumber(bbox.glyphIndex)) {
-          bbox.location = getBboxForGlyph(bbox.operatorIndex, bbox.glyphIndex, opData, page.view, page.rotate, left, bottom);
-        }
-
-        return bbox;
-      });
-      setBboxesAll(allBboxes);
-      setBboxesErrors(errorBboxes);
-    });
+    createErrorsMap(page);
+    pageRef.current = page;
     props.onPageLoadSuccess?.(page);
   }, [bboxList, props.treeElementsBboxes, props.width, props.height, scale]);
 
@@ -249,6 +260,33 @@ const PdfPage: FC<IPdfPageProps> = (props) => {
       }
     }, [activeBboxes, scale, props.page]),
   [activeBboxes]);
+  
+  /**
+   * Effect hook that updates the errors map and bboxes state when the bboxList changes.
+   *
+   * @description This effect is triggered when the bboxList or bboxes dependencies change.
+   * It checks if the bboxList has changed since the previous render and if the pageRef is not null.
+   * If both conditions are true, it updates the prevBboxList and creates an errors map for the pageRef.
+   * If the bboxList is empty and bboxes is not empty, it resets the bboxesErrors and bboxesAll states.
+   *
+   * @param {Array} bboxList - The list of bounding boxes.
+   * @param {Array} bboxes - The list of final bounding boxes to be rendered.
+   * @param {Object} pageRef - The reference to the page element.
+   * @param {Array} prevBboxList - The previous list of bounding boxes.
+   * @param {Function} setBboxesErrors - The function to update the bboxesErrors state.
+   * @param {Function} setBboxesAll - The function to update the bboxesAll state.
+   */
+  useEffect(() => {
+    const isSameAsPrev = _.isEqual(prevBboxList.current, bboxList);
+    if (bboxList.length && !isSameAsPrev && !_.isNil(pageRef.current)) {
+      prevBboxList.current = bboxList;
+      createErrorsMap(pageRef.current);
+    }
+    if (!bboxList.length && bboxes.length) {
+      setBboxesErrors([]);
+      setBboxesAll([]);
+    }
+  }, [bboxList, bboxes]);
 
   return (
     <StyledPdfPage
